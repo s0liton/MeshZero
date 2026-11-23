@@ -136,19 +136,23 @@ turned on, so while it is on anyone on your network can use the radio.
 
 ## Bluetooth (early access)
 
-Set Setup > App connection to Bluetooth and pick the device in the Meshtastic
-phone app (not in the phone's own Bluetooth settings). Wi-Fi and Bluetooth are
-not on at the same time: choosing one turns the other off. The device shows up
-as your short name and four digits, like `MZ01_1a2b`. The first time,
-a six-digit code appears on the Cardputer to type on the phone, so keep
-MeshZero open for that. After pairing, the phone connects by itself, and a
-Bluetooth icon shows in the top bar while it is connected.
+Set Setup > App connection to Bluetooth, then choose "Pair a new phone" on that
+page. For the next two minutes the device shows up in the Meshtastic phone app
+(not in the phone's own Bluetooth settings) as your short name and four digits,
+like `MZ01_1a2b`. Pick it there. A six-digit code appears on the Cardputer to
+type on the phone, so keep MeshZero open for that.
+
+After pairing, the phone connects by itself, and a Bluetooth icon shows in the
+top bar while it is connected. No other phone can pair until you choose "Pair a
+new phone" again, and until a phone is paired the device is not advertised at
+all. Wi-Fi and Bluetooth are not on at the same time: choosing one turns the
+other off.
+
+Pairing can be set to "Without a code". The phone then only asks you to agree,
+so anyone nearby could pair during those two minutes.
 
 To unpair, use "Forget the paired phone" on the same page, and forget the
 device in the phone's Bluetooth settings too.
-
-Pairing can be set to "No PIN". Then any phone nearby can connect and change
-the radio's settings, so use it with care.
 
 ## Building
 

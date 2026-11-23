@@ -65,6 +65,9 @@ struct Ble::Impl {
     bool dirty         = false;  // from_num moved since the phones were last told
     bool app_ok        = false;
     bool adv_ok        = false;
+    bool adv_wanted    = false;  // phones should be able to find it
+    bool adv_pending   = false;  // asked for, not answered yet
+    bool pairing       = false;  // a phone that is not paired yet may pair now
     bool registering   = false;
     uint64_t retry_ms  = 0;      // when to offer the service again, 0 for not
     std::string why;
@@ -91,8 +94,8 @@ struct Ble::Impl {
     {
         return sd_bus_message_append(reply, "o", kServicePath);
     }
-    // With a PIN, nothing can be read or written before the phone has paired
-    // with the code: the same demands the firmware makes.
+    // Nothing can be read or written before the phone has paired: with a PIN
+    // by typing the code, as the firmware demands, without one by agreeing.
     static int prop_char_flags(sd_bus*, const char*, const char*, const char*, sd_bus_message* reply, void* ud,
                                sd_bus_error*)
     {
@@ -101,9 +104,9 @@ struct Ble::Impl {
         int r            = sd_bus_message_open_container(reply, 'a', "s");
         if (r < 0) return r;
         if (c->id == kToRadio) {
-            r = sd_bus_message_append(reply, "s", pin ? "encrypt-authenticated-write" : "write");
+            r = sd_bus_message_append(reply, "s", pin ? "encrypt-authenticated-write" : "encrypt-write");
         } else {
-            r = sd_bus_message_append(reply, "s", pin ? "encrypt-authenticated-read" : "read");
+            r = sd_bus_message_append(reply, "s", pin ? "encrypt-authenticated-read" : "encrypt-read");
             if (r >= 0 && c->id != kFromRadio) r = sd_bus_message_append(reply, "s", "notify");
         }
         if (r < 0) return r;
@@ -242,7 +245,7 @@ struct Ble::Impl {
         // The Bluetooth daemon dropped it (adapter switched off, say): offer it again later.
         Impl* self     = static_cast<Impl*>(ud);
         self->adv_ok   = false;
-        self->retry_ms = now_ms() + kRetryMs;
+        if (self->adv_wanted) self->retry_ms = now_ms() + kRetryMs;
         return sd_bus_reply_method_return(m, "");
     }
 
@@ -253,13 +256,21 @@ struct Ble::Impl {
         passkey = key;
         if (h.on_passkey) h.on_passkey(passkey);
     }
-    static int on_display_passkey(sd_bus_message* m, void* ud, sd_bus_error*)
+    static int on_display_passkey(sd_bus_message* m, void* ud, sd_bus_error* error)
     {
         const char* device = nullptr;
         uint32_t passkey   = 0;
         uint16_t entered   = 0;
         const int r        = sd_bus_message_read(m, "ouq", &device, &passkey, &entered);
         if (r < 0) return r;
+        Impl* self = static_cast<Impl*>(ud);
+        if (!self->pairing || !self->pin) {
+            // Nobody asked for a new phone to be let in: the code is not shown,
+            // and the attempt is called off.
+            sd_bus_call_method_async(self->bus, nullptr, kBluez, device, "org.bluez.Device1", "CancelPairing",
+                                     on_ignored_reply, self, "");
+            return sd_bus_error_set(error, "org.bluez.Error.Rejected", "Not pairing now");
+        }
         char text[16];
         snprintf(text, sizeof(text), "%06u", passkey % 1000000);
         static_cast<Impl*>(ud)->set_passkey(text);
@@ -283,10 +294,19 @@ struct Ble::Impl {
         static_cast<Impl*>(ud)->set_passkey("");
         return sd_bus_reply_method_return(m, "");
     }
-    // Pairing that would go through without the code being typed is refused.
     static int on_agent_reject(sd_bus_message*, void*, sd_bus_error* error)
     {
         return sd_bus_error_set(error, "org.bluez.Error.Rejected", "Pair with the code shown on the device");
+    }
+    // Pairing without a code being typed: only where no PIN is asked for, and
+    // only while a new phone is being let in.
+    static int on_agent_confirm(sd_bus_message* m, void* ud, sd_bus_error* error)
+    {
+        const Impl* self = static_cast<Impl*>(ud);
+        if (self->pin || !self->pairing) {
+            return sd_bus_error_set(error, "org.bluez.Error.Rejected", "Not pairing now");
+        }
+        return sd_bus_reply_method_return(m, "");
     }
 
     // ---- what the Bluetooth daemon tells us ----------------------------
@@ -327,6 +347,7 @@ struct Ble::Impl {
         const char *name = nullptr, *before = nullptr, *after = nullptr;
         if (sd_bus_message_read(m, "sss", &name, &before, &after) < 0) return 0;
         self->app_ok = self->adv_ok = false;
+        self->adv_pending           = false;
         self->registering           = false;
         self->retry_ms              = after && after[0] ? now_ms() + 2000 : 0;
         if (!after || !after[0]) self->why = "the system's Bluetooth service is not running";
@@ -353,15 +374,20 @@ struct Ble::Impl {
     }
     static int on_adv_registered(sd_bus_message* m, void* ud, sd_bus_error*)
     {
-        Impl* self = static_cast<Impl*>(ud);
+        Impl* self        = static_cast<Impl*>(ud);
+        self->adv_pending = false;
         if (sd_bus_message_is_method_error(m, nullptr)) {
             const sd_bus_error* e = sd_bus_message_get_error(m);
-            self->why      = std::string("cannot advertise: ") + (e && e->message ? e->message : "unknown error");
-            self->retry_ms = now_ms() + kRetryMs;
-            return 0;
+            if (!(e && e->name && strcmp(e->name, "org.bluez.Error.AlreadyExists") == 0)) {
+                self->why      = std::string("cannot advertise: ") + (e && e->message ? e->message : "unknown error");
+                self->retry_ms = now_ms() + kRetryMs;
+                return 0;
+            }
         }
         self->adv_ok = true;
         self->why.clear();
+        // Asked to stop while this was on its way.
+        if (!self->adv_wanted) self->apply_advertising();
         return 0;
     }
     static int on_ignored_reply(sd_bus_message*, void*, sd_bus_error*)
@@ -385,16 +411,27 @@ struct Ble::Impl {
             sd_bus_call_method_async(bus, nullptr, kBluez, adapter.c_str(), "org.bluez.GattManager1",
                                      "RegisterApplication", on_app_registered, this, "oa{sv}", kAppPath, 0);
         }
-        if (!adv_ok) {
+        apply_advertising();
+        // DisplayOnly: this side shows six digits and the phone types them.
+        // NoInputNoOutput: the phone only asks its user to agree.
+        sd_bus_call_method_async(bus, nullptr, kBluez, "/org/bluez", "org.bluez.AgentManager1", "RegisterAgent",
+                                 on_ignored_reply, this, "os", kAgentPath, pin ? "DisplayOnly" : "NoInputNoOutput");
+        sd_bus_call_method_async(bus, nullptr, kBluez, "/org/bluez", "org.bluez.AgentManager1", "RequestDefaultAgent",
+                                 on_ignored_reply, this, "o", kAgentPath);
+    }
+
+    // Puts the advertisement on the air or takes it off, as adv_wanted says.
+    void apply_advertising()
+    {
+        if (!bus || adv_pending) return;
+        if (adv_wanted && !adv_ok) {
+            adv_pending = true;
             sd_bus_call_method_async(bus, nullptr, kBluez, adapter.c_str(), "org.bluez.LEAdvertisingManager1",
                                      "RegisterAdvertisement", on_adv_registered, this, "oa{sv}", kAdvPath, 0);
-        }
-        if (pin) {
-            // DisplayOnly: this side shows six digits and the phone types them.
-            sd_bus_call_method_async(bus, nullptr, kBluez, "/org/bluez", "org.bluez.AgentManager1", "RegisterAgent",
-                                     on_ignored_reply, this, "os", kAgentPath, "DisplayOnly");
-            sd_bus_call_method_async(bus, nullptr, kBluez, "/org/bluez", "org.bluez.AgentManager1",
-                                     "RequestDefaultAgent", on_ignored_reply, this, "o", kAgentPath);
+        } else if (!adv_wanted && adv_ok) {
+            adv_ok = false;
+            sd_bus_call_method_async(bus, nullptr, kBluez, adapter.c_str(), "org.bluez.LEAdvertisingManager1",
+                                     "UnregisterAdvertisement", on_ignored_reply, this, "o", kAdvPath);
         }
     }
 };
@@ -451,8 +488,8 @@ const sd_bus_vtable* Ble::Impl::agent_vtable()
         SD_BUS_METHOD("DisplayPinCode", "os", "", on_display_pincode, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("RequestPinCode", "o", "s", on_agent_reject, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("RequestPasskey", "o", "u", on_agent_reject, SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD("RequestConfirmation", "ou", "", on_agent_reject, SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD("RequestAuthorization", "o", "", on_agent_reject, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("RequestConfirmation", "ou", "", on_agent_confirm, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("RequestAuthorization", "o", "", on_agent_confirm, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("AuthorizeService", "os", "", on_agent_ok, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("Cancel", "", "", on_agent_done, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_VTABLE_END,
@@ -593,6 +630,7 @@ bool Ble::start(const std::string& name, bool pin, Handlers handlers)
         return false;
     }
     s.app_ok = s.adv_ok = false;
+    s.adv_pending = s.adv_wanted = s.pairing = false;
     s.register_all();
     return true;
 }
@@ -623,6 +661,23 @@ bool Ble::running() const
 bool Ble::advertising() const
 {
     return impl_->bus && impl_->app_ok && impl_->adv_ok;
+}
+
+bool Ble::ready() const
+{
+    return impl_->bus && impl_->app_ok;
+}
+
+void Ble::set_advertising(bool on)
+{
+    impl_->adv_wanted = on;
+    impl_->apply_advertising();
+}
+
+void Ble::set_pairing(bool open)
+{
+    impl_->pairing = open;
+    if (!open) impl_->set_passkey("");
 }
 
 const std::string& Ble::why() const
@@ -725,6 +780,12 @@ bool Ble::advertising() const
 {
     return false;
 }
+bool Ble::ready() const
+{
+    return false;
+}
+void Ble::set_advertising(bool) {}
+void Ble::set_pairing(bool) {}
 const std::string& Ble::why() const
 {
     return impl_->why;

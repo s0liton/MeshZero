@@ -216,6 +216,11 @@ void Mesh::set_background(bool on)
     send_control(on ? "bg=1" : "bg=0");
 }
 
+void Mesh::set_bluetooth_pairing(bool open)
+{
+    send_control(open ? "btpair=1" : "btpair=0");
+}
+
 void Mesh::forget_bluetooth_phones()
 {
     send_control("btforget");
@@ -533,6 +538,9 @@ void Mesh::on_packet(const meshtastic_MeshPacket& p)
             bluetooth_key = text.substr(9);
         } else if (text.rfind("mz:btconn=", 0) == 0) {
             bluetooth_conn = atoi(text.c_str() + 10);
+        } else if (text.rfind("mz:btpair=", 0) == 0) {
+            const int left       = atoi(text.c_str() + 10);
+            bluetooth_pair_until = left > 0 ? now_ms() + static_cast<uint64_t>(left) * 1000 : 0;
         } else if (text.rfind("mz:btpaired=", 0) == 0) {
             bluetooth_paired = atoi(text.c_str() + 12);
         } else if (text.rfind("mz:btpeer=", 0) == 0) {

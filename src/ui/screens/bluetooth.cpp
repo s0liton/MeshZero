@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // How other apps reach the radio, over Wi-Fi or Bluetooth: its settings page,
 // and the page that shows the code a phone has to type to pair.
+#include "common/util.h"
 #include "ui/app.h"
 
 namespace mz {
@@ -33,7 +34,9 @@ public:
         const int mode = mesh.app_connection();
         row("Connection", mode == Mesh::kAppWifi ? "Wi-Fi" : mode == Mesh::kAppBluetooth ? "Bluetooth (early access)" : "off",
             true);
-        pairing_row_ = forget_row_ = -1;
+        pairing_row_ = forget_row_ = pair_row_ = -1;
+        const uint64_t now  = now_ms();
+        const int pair_left = mesh.bluetooth_pair_until > now ? static_cast<int>((mesh.bluetooth_pair_until - now) / 1000) : 0;
         if (mode == Mesh::kAppWifi) {
             const std::vector<std::string> addrs = local_addresses();
             if (addrs.empty()) row("Address", "no network", false);
@@ -42,16 +45,30 @@ public:
                 false);
         } else if (mode == Mesh::kAppBluetooth) {
             pairing_row_ = static_cast<int>(items.size());
-            row("Pairing", mesh.bluetooth_pin == 0 ? "no PIN" : "code on this screen", true);
+            row("Pairing", mesh.bluetooth_pin == 0 ? "without a code" : "code on this screen", true);
             row("Name", mesh.bluetooth_name.empty() ? "-" : mesh.bluetooth_name, false);
             std::string status = mesh.bluetooth_why.empty() ? "starting" : "not working";
             if (mesh.bluetooth_conn > 0) {
                 status = mesh.bluetooth_paired > 0 ? "paired, connected" : "connected";
-            } else if (mesh.bluetooth_ok) {
-                status = mesh.bluetooth_paired > 0 ? "paired, not connected" : "ready to pair";
+            } else if (pair_left > 0) {
+                char left[40];
+                snprintf(left, sizeof(left), "pairing, %d:%02d left", pair_left / 60, pair_left % 60);
+                status = left;
+            } else if (mesh.bluetooth_paired > 0) {
+                status = mesh.bluetooth_ok ? "paired, not connected" : status;
+            } else if (mesh.bluetooth_why.empty()) {
+                status = "not paired";
             }
             row("Status", status, false);
             if (mesh.bluetooth_conn > 0 && !mesh.bluetooth_peer.empty()) row("Phone", mesh.bluetooth_peer, false);
+            {
+                pair_row_ = static_cast<int>(items.size());
+                ui::ListItem it;
+                it.text      = pair_left > 0 ? "Stop pairing" : "Pair a new phone";
+                it.has_color = true;
+                it.color     = ui::c_accent();
+                items.push_back(std::move(it));
+            }
             if (mesh.bluetooth_paired > 0) {
                 forget_row_ = static_cast<int>(items.size());
                 ui::ListItem it;
@@ -73,13 +90,13 @@ public:
                 "How other apps use this radio. Only one way is on at a time.\n\n"
                 "Wi-Fi: for MeshMonitor, the meshtastic command or a phone app on your network, through port 4403 at "
                 "the address shown. There is no password, so use it only on networks you trust.\n\n"
-                "Bluetooth (early access): for the Meshtastic phone apps when there is no Wi-Fi to share. In the "
-                "phone app, not the phone's own Bluetooth settings, look for the name shown here. It has seen little "
-                "testing with the phone apps so far.\n\n"
-                "Pairing with a code: the first time a phone connects, six digits appear on this screen to type on "
-                "the phone. MeshZero has to be open for that. Afterwards the phone connects by itself, also while "
-                "MeshZero is closed.\n\n"
-                "No PIN: any phone nearby can connect and use the radio, change its settings included.\n\n"
+                "Bluetooth (early access): for the Meshtastic phone apps when there is no Wi-Fi to share.\n\n"
+                "Pair a new phone lets a phone pair for the next two minutes: in the Meshtastic phone app, not the "
+                "phone's own Bluetooth settings, pick the name shown here. The rest of the time no new phone can "
+                "pair, and until a phone is paired the device does not show up at all.\n\n"
+                "Pairing with a code: six digits appear on this screen to type on the phone. Without a code: the "
+                "phone only asks to agree, so anyone nearby could pair during those two minutes.\n\n"
+                "A paired phone connects by itself afterwards, also while MeshZero is closed.\n\n"
                 "With Run in background off, the radio starts when an app connects and stops again after it leaves.";
             if (mesh.app_connection() == Mesh::kAppBluetooth && !mesh.bluetooth_why.empty()) {
                 text = "Bluetooth is not working: " + mesh.bluetooth_why + ".\n\n" + text;
@@ -101,8 +118,12 @@ public:
             app.push(make_picker(app, "App connection", options, mesh.app_connection(), [m, a, bt](int choice) {
                 if (choice < 0 || choice > (bt ? 2 : 1)) return;
                 m->set_app_connection(choice);
-                if (choice == Mesh::kAppBluetooth) a->toast("Look for this device in the Meshtastic phone app");
+                if (choice == Mesh::kAppBluetooth) a->toast("Use Pair a new phone to let a phone in");
             }));
+        } else if (i == pair_row_) {
+            const bool open = mesh.bluetooth_pair_until <= now_ms();
+            mesh.set_bluetooth_pairing(open);
+            if (open) app.toast("For 2 minutes: pick this device in the Meshtastic phone app");
         } else if (i == forget_row_) {
             app.push(make_confirm(app, "Forget paired phones",
                                   "The phone will have to pair again with a new code. On the phone, forget this "
@@ -113,7 +134,7 @@ public:
                                       a->toast("Pairing forgotten. Forget this device on the phone too.");
                                   }));
         } else if (i == pairing_row_) {
-            app.push(make_picker(app, "Pairing", {"Code on this screen", "No PIN"}, mesh.bluetooth_pin == 0 ? 1 : 0,
+            app.push(make_picker(app, "Pairing", {"Code on this screen", "Without a code"}, mesh.bluetooth_pin == 0 ? 1 : 0,
                                  [m](int choice) {
                                      if (choice == 0 || choice == 1) m->set_bluetooth_pin(choice == 0);
                                  }));
@@ -125,6 +146,7 @@ private:
     std::unique_ptr<ui::ListView> list_;
     int pairing_row_ = -1;
     int forget_row_  = -1;
+    int pair_row_    = -1;
 };
 
 // Shown while a phone is pairing; goes away by itself once that is over.

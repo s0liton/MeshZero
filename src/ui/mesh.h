@@ -215,6 +215,9 @@ public:
     int bluetooth_paired = 0;     // phones paired
     std::string bluetooth_peer;   // the name of a connected phone
     int network_conn     = 0;     // apps connected from other devices over the network
+    // A new phone may pair until then (as now_ms() counts), 0 when none may.
+    uint64_t bluetooth_pair_until = 0;
+    void set_bluetooth_pairing(bool open);
     void set_bluetooth_pin(bool on);
     // Drops the pairing with every phone. Each phone has to forget this
     // device as well before it can pair again.

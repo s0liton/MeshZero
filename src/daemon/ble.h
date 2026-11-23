@@ -48,13 +48,22 @@ public:
     // Makes the Bluetooth daemon forget a device, its pairing included.
     static bool remove_device(const std::string& path);
 
-    // Starts offering the service under this name. With `pin`, a phone has to
-    // pair with a code shown here before it can use it. False when the
+    // Starts offering the service under this name. A phone has to pair before
+    // it can use it: with `pin` by typing a code shown here, without by just
+    // agreeing on the phone. Nothing is advertised and no pairing is accepted
+    // until set_advertising() and set_pairing() say so. False when the
     // system's Bluetooth cannot be reached; why() then says more.
     bool start(const std::string& name, bool pin, Handlers handlers);
     void stop();
     bool running() const;
-    // Offered and accepted by the Bluetooth daemon: phones can find it.
+    // Whether phones can find it: needed for a new phone to pair, and for a
+    // paired one to come back.
+    void set_advertising(bool on);
+    // Whether a phone that is not paired yet may pair now.
+    void set_pairing(bool open);
+    // The service is registered with the Bluetooth daemon.
+    bool ready() const;
+    // Advertised and accepted by the Bluetooth daemon: phones can find it.
     bool advertising() const;
     const std::string& why() const;
 

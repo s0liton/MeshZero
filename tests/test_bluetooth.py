@@ -106,8 +106,9 @@ async def run(daemon_pid):
     check(len(services) == 1 and list(services.values())[0]["UUID"].value == "6ba1b218-15a8-461f-9fa8-5dcae273eafd"
           and list(services.values())[0]["Primary"].value, "one primary Meshtastic service is listed")
     check({TORADIO, FROMRADIO, FROMNUM} <= set(chars), "ToRadio, FromRadio and FromNum are listed")
-    check(chars[TORADIO][1]["Flags"].value == ["write"] and chars[FROMRADIO][1]["Flags"].value == ["read"]
-          and chars[FROMNUM][1]["Flags"].value == ["read", "notify"], "without a PIN they are plainly readable and writable")
+    check(chars[TORADIO][1]["Flags"].value == ["encrypt-write"] and chars[FROMRADIO][1]["Flags"].value == ["encrypt-read"]
+          and chars[FROMNUM][1]["Flags"].value == ["encrypt-read", "notify"],
+          "without a code they still take a paired, encrypted connection")
     check(all(c[1]["Service"].value == list(services)[0] for c in chars.values()), "they belong to the service")
     to_radio, from_radio, from_num = chars[TORADIO][0], chars[FROMRADIO][0], chars[FROMNUM][0]
 
@@ -133,6 +134,10 @@ async def run(daemon_pid):
     check(kinds and kinds[0] == "my_info" and kinds[-1] == "config_complete_id" and config[-1].config_complete_id == 4242,
           "a phone gets the whole configuration, ending with its own request number")
     check(kinds.count("node_info") == 9 and kinds.count("channel") == 8, "with every node and channel")
+    told = [m.config.bluetooth for m in config if m.WhichOneof("payload_variant") == "config"
+            and m.config.WhichOneof("payload_variant") == "bluetooth"]
+    check(len(told) == 1 and told[0].enabled and told[0].mode == 2,
+          "and is told Bluetooth is on without a PIN, as it is here, not what the radio daemon says")
     check(len(counts) > 0, "and was told there was something to read")
     check(struct.unpack("<I", await read(bus, dest, from_num, PHONE_A))[0] == counts[-1],
           "the counter reads as it was last announced")
